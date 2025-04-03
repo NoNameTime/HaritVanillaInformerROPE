@@ -71,6 +71,8 @@ class RotaryPositionalEmbedding(nn.Module):
         # Original shape: (seq_len, d_model/2) -> expand to (1, seq_len, d_model/2)
         sin_embed = self.sin_embed[:seq_len, :].unsqueeze(0)
         cos_embed = self.cos_embed[:seq_len, :].unsqueeze(0)
+        print("sin_embed shape after slicing:", sin_embed.shape)
+        print("sin_embed shape after slicing:", cos_embed.shape)
         # Instead of doing separate 2D operations, we simply expand them to full d_model.
         # This creates tensors of shape (1, seq_len, d_model) where the embedding for each
         # dimension pair is repeated.
