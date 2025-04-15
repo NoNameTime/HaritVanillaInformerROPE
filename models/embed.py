@@ -68,6 +68,8 @@ class RotaryPositionalEmbeddingBase(nn.Module):
         
         # Apply the rotation to the input tensor
         return x * cos_embed + self.rotate_half(x) * sin_embed
+
+
 class LearnableRotaryPositionalEmbedding(RotaryPositionalEmbeddingBase):
     def __init__(self, d_model, max_len=5000):
         # Set learnable=True for a learnable version
