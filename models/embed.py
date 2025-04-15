@@ -4,339 +4,184 @@ import torch.nn.functional as F
 
 import math
 
-class RotaryPositionalEmbedding(nn.Module):
-    """
-    Fixed (non-learnable) Rotary Positional Embedding (ROPE).
-    
-    This implementation applies the rotary transformation using pointwise 
-    multiplications. For an input x of shape (batch, seq_len, d_model) with even d_model,
-    the rotation is applied as:
-    
-        x_rot = x * cos_embed_full + rotate_half(x) * sin_embed_full
-    
-    where cos_embed_full and sin_embed_full are constructed by concatenating the 
-    fixed sin/cos embeddings for each half.
-    """
-    def __init__(self, d_model, max_len=5000):
-        super(RotaryPositionalEmbedding, self).__init__()
-        assert d_model % 2 == 0, "d_model must be even for ROPE."
+class RotaryPositionalEmbeddingBase(nn.Module):
+    def __init__(self, d_model, max_len=5000, learnable=False):
+        """
+        Parameters:
+            d_model (int): The model dimension.
+            max_len (int): Maximum sequence length.
+            learnable (bool): If True, the positional embeddings will be learnable;
+                              otherwise, they are fixed buffers.
+        """
+        super(RotaryPositionalEmbeddingBase, self).__init__()
+        assert d_model % 2 == 0, "d_model must be divisible by 2"
         self.d_model = d_model
-
-        # Compute the inverse frequency vector.
+        
+        # Compute the inverse frequency for the embeddings
         inv_freq = 1.0 / (10000 ** (torch.arange(0, d_model, 2).float() / d_model))
-        # Create a positions vector (max_len positions).
+        # Create a list of positions
         positions = torch.arange(0, max_len, dtype=torch.float)
-        # Compute sinusoidal inputs: shape (max_len, d_model/2)
+        # Compute the outer product to obtain the sinusoid input
         sinusoid_inp = torch.einsum("i,j->ij", positions, inv_freq)
-        # Pre-compute sin and cos embeddings.
-        sin_embed = torch.sin(sinusoid_inp)  # (max_len, d_model/2)
-        cos_embed = torch.cos(sinusoid_inp)  # (max_len, d_model/2)
+        
+        # Precompute sin and cosine embeddings
+        sin_embed = torch.sin(sinusoid_inp)
+        cos_embed = torch.cos(sinusoid_inp)
+        
+        if learnable:
+            # Make embeddings learnable.
+            self.sin_embed = nn.Parameter(sin_embed, requires_grad=True)
+            self.cos_embed = nn.Parameter(cos_embed, requires_grad=True)
+        else:
+            # Register the embeddings as buffers (fixed values).
+            self.register_buffer("sin_embed", sin_embed)
+            self.register_buffer("cos_embed", cos_embed)
 
-        # Learnable ROPE
-        # Register these as learnable parameters.
-        self.sin_embed = nn.Parameter(sin_embed, requires_grad=True)
-        self.cos_embed = nn.Parameter(cos_embed, requires_grad=True)
-
-        # Fixed ROPE
-        # Register buffers so they remain fixed.
-        #self.register_buffer("sin_embed", sin_embed)
-        #self.register_buffer("cos_embed", cos_embed)
-    
     def rotate_half(self, x):
         """
-        Helper function that rotates half of the dimensions of x.
-        Splits x into two halves and returns [-x2, x1] concatenated along the last dim.
+        Rotates half the dimensions of the input tensor.
+        Splits the last dimension into two parts and performs a fixed rotation.
         """
-        x_even = -x[..., 1::2]
-        x_odd  = x[..., 0::2]
-
-        # Stack b and a along a new last dimension.
-        stacked = torch.stack([x_even, x_odd], dim=-1)  # Shape becomes (1, 2, 3, 2)
-
-        # Reshape to flatten the last two dimensions into one.
-        return stacked.view(x_even.shape[0], x_even.shape[1], -1)  # Shape: (1, 2, 6)
+        x_even = -x[..., 1::2]  # Negate every other component
+        x_odd  = x[..., 0::2]   # Keep every other component
+        
+        # Stack the rotated values along a new last dimension
+        stacked = torch.stack([x_even, x_odd], dim=-1)
+        # Reshape the last two dimensions back into a single dimension
+        new_shape = x_even.shape[:-1] + (-1,)
+        return stacked.view(*new_shape)
             
     def forward(self, x):
         """
-        Applies the rotary transformation using pointwise multiplication.
-        
-        Args:
-            x: Tensor of shape (batch, seq_len, d_model)
-            
-        Returns:
-            Tensor of shape (batch, seq_len, d_model) after applying ROPE.
+        Applies rotary positional embeddings to input tensor x.
+        x is expected to have shape (batch, seq_len, d_model).
         """
         batch, seq_len, d_model = x.size()
-        # Get fixed sin and cos embeddings for the current sequence length.
-        # Original shape: (seq_len, d_model/2) -> expand to (1, seq_len, d_model/2)
+        
+        # Select the precomputed embeddings up to the sequence length
         sin_embed = self.sin_embed[:seq_len, :].unsqueeze(0)
         cos_embed = self.cos_embed[:seq_len, :].unsqueeze(0)
-        #print("sin_embed shape after slicing:", sin_embed.shape)
-        #print("sin_embed shape after slicing:", cos_embed.shape)
-        # Instead of doing separate 2D operations, we simply expand them to full d_model.
-        # This creates tensors of shape (1, seq_len, d_model) where the embedding for each
-        # dimension pair is repeated.
+        
+        # Adjust dimensions to match the model's d_model by repeating each embedding along the last dimension
         sin_embed = torch.repeat_interleave(sin_embed, repeats=2, dim=-1)
         cos_embed = torch.repeat_interleave(cos_embed, repeats=2, dim=-1)
-        # Apply the rotary transformation with pointwise multiplication.
+        
+        # Apply the rotation to the input tensor
         return x * cos_embed + self.rotate_half(x) * sin_embed
-
-
-class RotaryPositionalEmbeddingFixed(nn.Module):
-    """
-    Fixed (non-learnable) Rotary Positional Embedding (ROPE).
-    
-    This implementation applies the rotary transformation using pointwise 
-    multiplications. For an input x of shape (batch, seq_len, d_model) with even d_model,
-    the rotation is applied as:
-    
-        x_rot = x * cos_embed_full + rotate_half(x) * sin_embed_full
-    
-    where cos_embed_full and sin_embed_full are constructed by concatenating the 
-    fixed sin/cos embeddings for each half.
-    """
+class LearnableRotaryPositionalEmbedding(RotaryPositionalEmbeddingBase):
     def __init__(self, d_model, max_len=5000):
-        super(RotaryPositionalEmbeddingFixed, self).__init__()
-        assert d_model % 2 == 0, "d_model must be even for ROPE."
-        self.d_model = d_model
+        # Set learnable=True for a learnable version
+        super(LearnableRotaryPositionalEmbedding, self).__init__(d_model, max_len, learnable=True)
 
-        # Compute the inverse frequency vector.
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, d_model, 2).float() / d_model))
-        # Create a positions vector (max_len positions).
-        positions = torch.arange(0, max_len, dtype=torch.float)
-        # Compute sinusoidal inputs: shape (max_len, d_model/2)
-        sinusoid_inp = torch.einsum("i,j->ij", positions, inv_freq)
-        # Pre-compute sin and cos embeddings.
-        sin_embed = torch.sin(sinusoid_inp)  # (max_len, d_model/2)
-        cos_embed = torch.cos(sinusoid_inp)  # (max_len, d_model/2)
+class FixedRotaryPositionalEmbedding(RotaryPositionalEmbeddingBase):
+    def __init__(self, d_model, max_len=5000):
+        # Use learnable=False to keep embeddings fixed
+        super(FixedRotaryPositionalEmbedding, self).__init__(d_model, max_len, learnable=False)
 
-        # Learnable ROPE
-        # Register these as learnable parameters.
-        #self.sin_embed = nn.Parameter(sin_embed, requires_grad=True)
-        #self.cos_embed = nn.Parameter(cos_embed, requires_grad=True)
 
-        # Fixed ROPE
-        # Register buffers so they remain fixed.
-        self.register_buffer("sin_embed", sin_embed)
-        self.register_buffer("cos_embed", cos_embed)
-    
-    def rotate_half(self, x):
+
+
+class RotaryChannelEmbeddingBase(nn.Module):
+    def __init__(self, c_in, d_model, max_len=5000, learnable=False):
         """
-        Helper function that rotates half of the dimensions of x.
-        Splits x into two halves and returns [-x2, x1] concatenated along the last dim.
-        """
-        x_even = -x[..., 1::2]
-        x_odd  = x[..., 0::2]
+        Base class for Rotary Channel Embeddings that implements the common functionality,
+        including the precomputation of sine and cosine embeddings and the forward method.
 
-        # Stack b and a along a new last dimension.
-        stacked = torch.stack([x_even, x_odd], dim=-1)  # Shape becomes (1, 2, 3, 2)
-
-        # Reshape to flatten the last two dimensions into one.
-        return stacked.view(x_even.shape[0], x_even.shape[1], -1)  # Shape: (1, 2, 6)
-            
-    def forward(self, x):
-        """
-        Applies the rotary transformation using pointwise multiplication.
-        
         Args:
-            x: Tensor of shape (batch, seq_len, d_model)
-            
-        Returns:
-            Tensor of shape (batch, seq_len, d_model) after applying ROPE.
+            c_in (int): Number of input channels.
+            d_model (int): Model dimension (must be even).
+            max_len (int): Maximum sequence length.
+            learnable (bool): If True, the sinusoidal embeddings are learnable parameters;
+                              otherwise, they are fixed buffers.
         """
-        batch, seq_len, d_model = x.size()
-        # Get fixed sin and cos embeddings for the current sequence length.
-        # Original shape: (seq_len, d_model/2) -> expand to (1, seq_len, d_model/2)
-        sin_embed = self.sin_embed[:seq_len, :].unsqueeze(0)
-        cos_embed = self.cos_embed[:seq_len, :].unsqueeze(0)
-        # Instead of doing separate 2D operations, we simply expand them to full d_model.
-        # This creates tensors of shape (1, seq_len, d_model) where the embedding for each
-        # dimension pair is repeated.
-        sin_embed = torch.repeat_interleave(sin_embed, repeats=2, dim=-1)
-        cos_embed = torch.repeat_interleave(cos_embed, repeats=2, dim=-1)
-        # Apply the rotary transformation with pointwise multiplication.
-        return x * cos_embed + self.rotate_half(x) * sin_embed
-
-
-
-
-
-class RotaryChannelEmbeddingLearnable(nn.Module):
-    """
-    Fixed (non-learnable) Rotary Positional Embedding (ROPE).
-    
-    This implementation applies the rotary transformation using pointwise 
-    multiplications. For an input x of shape (batch, seq_len, d_model) with even d_model,
-    the rotation is applied as:
-    
-        x_rot = x * cos_embed_full + rotate_half(x) * sin_embed_full
-    
-    where cos_embed_full and sin_embed_full are constructed by concatenating the 
-    fixed sin/cos embeddings for each half.
-    """
-    def __init__(self, c_in, d_model, max_len=5000):
-        super(RotaryChannelEmbeddingLearnable, self).__init__()
+        super(RotaryChannelEmbeddingBase, self).__init__()
         assert d_model % 2 == 0, "d_model must be even for ROPE."
         self.d_model = d_model
         self.c_in = c_in
 
         # Compute the inverse frequency vector.
-        # Channel should be smaller
+        # Use 50000 instead of 10000 as in the provided example.
         inv_freq = 1.0 / (50000 ** (torch.arange(0, d_model, 2).float() / d_model))
-        # Create a positions vector (max_len positions).
+        # Create a positions vector for max_len positions.
         positions = torch.arange(0, max_len, dtype=torch.float)
         # Compute sinusoidal inputs: shape (max_len, d_model/2)
         sinusoid_inp = torch.einsum("i,j->ij", positions, inv_freq)
-        # Pre-compute sin and cos embeddings.
-        sin_embed = torch.sin(sinusoid_inp)  # (max_len, d_model/2)
-        cos_embed = torch.cos(sinusoid_inp)  # (max_len, d_model/2)
+        # Pre-compute sine and cosine embeddings.
+        sin_embed = torch.sin(sinusoid_inp)
+        cos_embed = torch.cos(sinusoid_inp)
 
-        # Learnable ROPE
-        # Register these as learnable parameters.
-        self.sin_embed = nn.Parameter(sin_embed, requires_grad=True)
-        self.cos_embed = nn.Parameter(cos_embed, requires_grad=True)
+        if learnable:
+            # Register as learnable parameters.
+            self.sin_embed = nn.Parameter(sin_embed, requires_grad=True)
+            self.cos_embed = nn.Parameter(cos_embed, requires_grad=True)
+        else:
+            # Register as buffers (fixed values).
+            self.register_buffer("sin_embed", sin_embed)
+            self.register_buffer("cos_embed", cos_embed)
 
-        # Fixed ROPE
-        # Register buffers so they remain fixed.
-        #self.register_buffer("sin_embed", sin_embed)
-        #self.register_buffer("cos_embed", cos_embed)
-    
     def rotate_half(self, x):
         """
         Helper function that rotates half of the dimensions of x.
-        Splits x into two halves and returns [-x2, x1] concatenated along the last dim.
+        Splits the last dimension into two halves and returns a tensor where
+        the first half is replaced with -second half and the second half with the first half.
+
+        Args:
+            x: Tensor of shape (batch, seq_len, d_model).
+        
+        Returns:
+            A tensor of shape (batch, seq_len, d_model) with dimensions rotated.
         """
-        x_even = -x[..., 1::2]
-        x_odd  = x[..., 0::2]
+        x_even = -x[..., 1::2]  # Negate the odd-indexed components.
+        x_odd  = x[..., 0::2]   # Keep the even-indexed components.
 
-        # Stack b and a along a new last dimension.
-        stacked = torch.stack([x_even, x_odd], dim=-1)  # Shape becomes (1, 2, 3, 2)
+        # Stack along a new last dimension.
+        stacked = torch.stack([x_even, x_odd], dim=-1)
+        # Merge the last two dimensions.
+        return stacked.view(x_even.shape[0], x_even.shape[1], -1)
 
-        # Reshape to flatten the last two dimensions into one.
-        return stacked.view(x_even.shape[0], x_even.shape[1], -1)  # Shape: (1, 2, 6)
-            
     def forward(self, x):
         """
         Applies the rotary transformation using pointwise multiplication.
-        
+
         Args:
-            x: Tensor of shape (batch, seq_len, d_model)
+            x: Tensor of shape (batch, seq_len, d_model).
             
         Returns:
-            Tensor of shape (batch, seq_len, d_model) after applying ROPE.
+            Tensor of shape (batch, seq_len, d_model) with rotary embeddings applied.
         """
         batch, seq_len, d_model = x.size()
-        # Get fixed sin and cos embeddings for the current sequence length.
-        # Original shape: (seq_len, d_model/2) -> expand to (1, seq_len, d_model/2)
-        sin_embed = self.sin_embed[:7, :].unsqueeze(0)
-        cos_embed = self.cos_embed[:7, :].unsqueeze(0)
-        
-        # Instead of doing separate 2D operations, we simply expand them to full d_model.
-        # This creates tensors of shape (1, seq_len, d_model) where the embedding for each
-        # dimension pair is repeated.
-        sin_embed = torch.repeat_interleave(sin_embed, repeats=2, dim=-1)
-        cos_embed = torch.repeat_interleave(cos_embed, repeats=2, dim=-1)
 
-        sin_embed = sin_embed.repeat(1, int(seq_len/7), 1)
-        cos_embed = cos_embed.repeat(1, int(seq_len/7), 1)
-        
-        #sin_embed = F.pad(sin_embed, (0, 0, 1, 1))
-        #cos_embed = F.pad(cos_embed, (0, 0, 1, 1))
+        # For this implementation, we only use the first 7 positions.
+        sin_embed = self.sin_embed[:7, :].unsqueeze(0)  # Shape: (1, 7, d_model/2)
+        cos_embed = self.cos_embed[:7, :].unsqueeze(0)  # Shape: (1, 7, d_model/2)
 
-        #print(f'{x[0,0,:]}    val: {int(seq_len/7)}', flush=True) 
-        
-        # Apply the rotary transformation with pointwise multiplication.
+        # Expand embeddings to cover the full d_model by repeating each half.
+        sin_embed = torch.repeat_interleave(sin_embed, repeats=2, dim=-1)  # Now shape: (1, 7, d_model)
+        cos_embed = torch.repeat_interleave(cos_embed, repeats=2, dim=-1)  # Now shape: (1, 7, d_model)
+
+        # Adjust the time dimension to match the sequence length (assuming seq_len is a multiple of 7).
+        repeat_factor = int(seq_len / 7)
+        sin_embed = sin_embed.repeat(1, repeat_factor, 1)
+        cos_embed = cos_embed.repeat(1, repeat_factor, 1)
+
+        # Apply the rotary transformation.
         return x * cos_embed + self.rotate_half(x) * sin_embed
 
 
-class RotaryChannelEmbeddingFixed(nn.Module):
-    """
-    Fixed (non-learnable) Rotary Positional Embedding (ROPE).
-    
-    This implementation applies the rotary transformation using pointwise 
-    multiplications. For an input x of shape (batch, seq_len, d_model) with even d_model,
-    the rotation is applied as:
-    
-        x_rot = x * cos_embed_full + rotate_half(x) * sin_embed_full
-    
-    where cos_embed_full and sin_embed_full are constructed by concatenating the 
-    fixed sin/cos embeddings for each half.
-    """
+class RotaryChannelEmbeddingLearnable(RotaryChannelEmbeddingBase):
     def __init__(self, c_in, d_model, max_len=5000):
-        super(RotaryChannelEmbeddingFixed, self).__init__()
-        assert d_model % 2 == 0, "d_model must be even for ROPE."
-        self.d_model = d_model
-        self.c_in = c_in
-
-        # Compute the inverse frequency vector.
-        # Channel should be smaller
-        inv_freq = 1.0 / (50000 ** (torch.arange(0, d_model, 2).float() / d_model))
-        # Create a positions vector (max_len positions).
-        positions = torch.arange(0, max_len, dtype=torch.float)
-        # Compute sinusoidal inputs: shape (max_len, d_model/2)
-        sinusoid_inp = torch.einsum("i,j->ij", positions, inv_freq)
-        # Pre-compute sin and cos embeddings.
-        sin_embed = torch.sin(sinusoid_inp)  # (max_len, d_model/2)
-        cos_embed = torch.cos(sinusoid_inp)  # (max_len, d_model/2)
-
-        # Learnable ROPE
-        # Register these as learnable parameters.
-        #self.sin_embed = nn.Parameter(sin_embed, requires_grad=True)
-        #self.cos_embed = nn.Parameter(cos_embed, requires_grad=True)
-
-        # Fixed ROPE
-        # Register buffers so they remain fixed.
-        self.register_buffer("sin_embed", sin_embed)
-        self.register_buffer("cos_embed", cos_embed)
-    
-    def rotate_half(self, x):
         """
-        Helper function that rotates half of the dimensions of x.
-        Splits x into two halves and returns [-x2, x1] concatenated along the last dim.
+        Learnable Rotary Channel Embedding: the sinusoidal embeddings are learnable.
         """
-        x_even = -x[..., 1::2]
-        x_odd  = x[..., 0::2]
+        super(RotaryChannelEmbeddingLearnable, self).__init__(c_in, d_model, max_len, learnable=True)
 
-        # Stack b and a along a new last dimension.
-        stacked = torch.stack([x_even, x_odd], dim=-1)  # Shape becomes (1, 2, 3, 2)
 
-        # Reshape to flatten the last two dimensions into one.
-        return stacked.view(x_even.shape[0], x_even.shape[1], -1)  # Shape: (1, 2, 6)
-            
-    def forward(self, x):
+class RotaryChannelEmbeddingFixed(RotaryChannelEmbeddingBase):
+    def __init__(self, c_in, d_model, max_len=5000):
         """
-        Applies the rotary transformation using pointwise multiplication.
-        
-        Args:
-            x: Tensor of shape (batch, seq_len, d_model)
-            
-        Returns:
-            Tensor of shape (batch, seq_len, d_model) after applying ROPE.
+        Fixed Rotary Channel Embedding: the sinusoidal embeddings remain fixed.
         """
-        batch, seq_len, d_model = x.size()
-        # Get fixed sin and cos embeddings for the current sequence length.
-        # Original shape: (seq_len, d_model/2) -> expand to (1, seq_len, d_model/2)
-        sin_embed = self.sin_embed[:7, :].unsqueeze(0)
-        cos_embed = self.cos_embed[:7, :].unsqueeze(0)
-        
-        # Instead of doing separate 2D operations, we simply expand them to full d_model.
-        # This creates tensors of shape (1, seq_len, d_model) where the embedding for each
-        # dimension pair is repeated.
-        sin_embed = torch.repeat_interleave(sin_embed, repeats=2, dim=-1)
-        cos_embed = torch.repeat_interleave(cos_embed, repeats=2, dim=-1)
-
-        sin_embed = sin_embed.repeat(1, int(seq_len/7), 1)
-        cos_embed = cos_embed.repeat(1, int(seq_len/7), 1)
-
-        #sin_embed = F.pad(sin_embed, (0, 0, 1, 1))
-        #cos_embed = F.pad(cos_embed, (0, 0, 1, 1))
-
-
-        #print(f'{x[0,0,:]}    val: {int(seq_len/7)}', flush=True) 
-        
-        # Apply the rotary transformation with pointwise multiplication.
-        return x * cos_embed + self.rotate_half(x) * sin_embed
-
+        super(RotaryChannelEmbeddingFixed, self).__init__(c_in, d_model, max_len, learnable=False)
 
 
 
@@ -445,29 +290,38 @@ class TimeFeatureEmbedding(nn.Module):
     def forward(self, x):
         return self.embed(x)
 
+
 class DataEmbedding(nn.Module):
     def __init__(self, c_in, d_model, embed_type='fixed', freq='h', dropout=0.1):
         super(DataEmbedding, self).__init__()
 
         self.value_embedding = TokenEmbedding(c_in=c_in, d_model=d_model)
         self.position_embedding = PositionalEmbedding(d_model=d_model)
-        self.temporal_embedding = TemporalEmbedding(d_model=d_model, embed_type=embed_type, freq=freq) if embed_type!='timeF' else TimeFeatureEmbedding(d_model=d_model, embed_type=embed_type, freq=freq)
+        self.temporal_embedding = (TemporalEmbedding(d_model=d_model, embed_type=embed_type, freq=freq)
+                                   if embed_type != 'timeF'
+                                   else TimeFeatureEmbedding(d_model=d_model, embed_type=embed_type, freq=freq))
 
-        self.rpe = RotaryPositionalEmbedding(d_model=d_model)
-        self.rpe_fixed = RotaryPositionalEmbeddingFixed(d_model=d_model)
+        # Change the instantiation here:
+        # Use the refactored base class's two subclasses:
+        self.rpe = LearnableRotaryPositionalEmbedding(d_model=d_model)
+        self.rpe_fixed = FixedRotaryPositionalEmbedding(d_model=d_model)
 
         self.fixed_channel_embedding = RotaryChannelEmbeddingFixed(c_in=c_in, d_model=d_model)
         self.learnable_channel_embedding = RotaryChannelEmbeddingLearnable(c_in=c_in, d_model=d_model)
-        
+
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x, x_mark):
-        #print(f'{x.size()}    Original', flush=True)
+        # First, apply the value embedding.
         x = self.value_embedding(x)
-        #print(f'{x.size()}    Value Embedded', flush=True)
-        x = self.rpe.forward(x) + self.rpe_fixed.forward(x) #+ self.temporal_embedding(x_mark) # self.position_embedding(x) #+ self.temporal_embedding(x_mark)
-        #print(f'{x.size()}    RPE', flush=True)
-        x = self.fixed_channel_embedding.forward(x) + self.learnable_channel_embedding.forward(x)
+
+        # Apply rotary positional embeddings from both learnable and fixed instances.
+        # Note: You can call the instances directly, rather than explicitly invoking .forward().
+        x = self.rpe(x) + self.rpe_fixed(x)
         
+        # Add channel embeddings
+        x = self.fixed_channel_embedding(x) + self.learnable_channel_embedding(x)
         #x = self.value_embedding(x) + self.temporal_embedding(x_mark) + self.position_embedding(x) #+ self.temporal_embedding(x_mark)
         return self.dropout(x)
+
+
