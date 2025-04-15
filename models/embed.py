@@ -4,187 +4,151 @@ import torch.nn.functional as F
 
 import math
 
-class RotaryPositionalEmbeddingBase(nn.Module):
-    def __init__(self, d_model, max_len=5000, learnable=False):
+class UnifiedRotaryEmbeddingBase(nn.Module):
+    def __init__(self,
+                 d_model,
+                 max_len=5000,
+                 learnable=False,
+                 mode="positional",  # "positional" or "channel"
+                 c_in=None,          # required in "channel" mode
+                 fixed_embed_length=None,  # for channel mode: how many positions to precompute (default is 7)
+                 base_scale=None):   # denominator base for inverse frequency (default: 10000 for positional, 50000 for channel)
         """
-        Parameters:
-            d_model (int): The model dimension.
-            max_len (int): Maximum sequence length.
-            learnable (bool): If True, the positional embeddings will be learnable;
-                              otherwise, they are fixed buffers.
+        A unified base class for Rotary Embeddings, supporting both positional and channel applications.
+        
+        Args:
+            d_model (int): Model dimension (must be even).
+            max_len (int): Maximum sequence length. In positional mode, this defines the embedding table size.
+            learnable (bool): If True, the embeddings are learnable parameters.
+            mode (str): Either "positional" or "channel". Determines the forward behavior.
+            c_in (int, optional): Number of input channels. Required if mode=="channel".
+            fixed_embed_length (int, optional): In channel mode, the number of positions in the precomputed table.
+                                                Defaults to 7 if not provided.
+            base_scale (float, optional): Scale factor in the denominator for computing the inverse frequency.
+                                          Defaults to 10000 for positional and 50000 for channel.
         """
-        super(RotaryPositionalEmbeddingBase, self).__init__()
+        super(UnifiedRotaryEmbeddingBase, self).__init__()
         assert d_model % 2 == 0, "d_model must be divisible by 2"
         self.d_model = d_model
-        
-        # Compute the inverse frequency for the embeddings
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, d_model, 2).float() / d_model))
-        # Create a list of positions
-        positions = torch.arange(0, max_len, dtype=torch.float)
-        # Compute the outer product to obtain the sinusoid input
-        sinusoid_inp = torch.einsum("i,j->ij", positions, inv_freq)
-        
-        # Precompute sin and cosine embeddings
-        sin_embed = torch.sin(sinusoid_inp)
-        cos_embed = torch.cos(sinusoid_inp)
-        
-        if learnable:
-            # Make embeddings learnable.
-            self.sin_embed = nn.Parameter(sin_embed, requires_grad=True)
-            self.cos_embed = nn.Parameter(cos_embed, requires_grad=True)
+        self.mode = mode
+
+        if mode == "channel":
+            if c_in is None:
+                raise ValueError("c_in must be provided for channel mode.")
+            self.c_in = c_in
+            # In channel mode we use a fixed number of positions from the sinusoidal table.
+            self.embed_length = fixed_embed_length if fixed_embed_length is not None else 7
+            # Use a different base scale for channel (if not overridden).
+            self.base_scale = base_scale if base_scale is not None else 50000
+        elif mode == "positional":
+            # For positional mode, use the entire sequence up to max_len.
+            self.embed_length = max_len
+            self.base_scale = base_scale if base_scale is not None else 10000
         else:
-            # Register the embeddings as buffers (fixed values).
-            self.register_buffer("sin_embed", sin_embed)
-            self.register_buffer("cos_embed", cos_embed)
-
-    def rotate_half(self, x):
-        """
-        Rotates half the dimensions of the input tensor.
-        Splits the last dimension into two parts and performs a fixed rotation.
-        """
-        x_even = -x[..., 1::2]  # Negate every other component
-        x_odd  = x[..., 0::2]   # Keep every other component
-        
-        # Stack the rotated values along a new last dimension
-        stacked = torch.stack([x_even, x_odd], dim=-1)
-        # Reshape the last two dimensions back into a single dimension
-        new_shape = x_even.shape[:-1] + (-1,)
-        return stacked.view(*new_shape)
-            
-    def forward(self, x):
-        """
-        Applies rotary positional embeddings to input tensor x.
-        x is expected to have shape (batch, seq_len, d_model).
-        """
-        batch, seq_len, d_model = x.size()
-        
-        # Select the precomputed embeddings up to the sequence length
-        sin_embed = self.sin_embed[:seq_len, :].unsqueeze(0)
-        cos_embed = self.cos_embed[:seq_len, :].unsqueeze(0)
-        
-        # Adjust dimensions to match the model's d_model by repeating each embedding along the last dimension
-        sin_embed = torch.repeat_interleave(sin_embed, repeats=2, dim=-1)
-        cos_embed = torch.repeat_interleave(cos_embed, repeats=2, dim=-1)
-        
-        # Apply the rotation to the input tensor
-        return x * cos_embed + self.rotate_half(x) * sin_embed
-
-
-class LearnableRotaryPositionalEmbedding(RotaryPositionalEmbeddingBase):
-    def __init__(self, d_model, max_len=5000):
-        # Set learnable=True for a learnable version
-        super(LearnableRotaryPositionalEmbedding, self).__init__(d_model, max_len, learnable=True)
-
-class FixedRotaryPositionalEmbedding(RotaryPositionalEmbeddingBase):
-    def __init__(self, d_model, max_len=5000):
-        # Use learnable=False to keep embeddings fixed
-        super(FixedRotaryPositionalEmbedding, self).__init__(d_model, max_len, learnable=False)
-
-
-
-
-class RotaryChannelEmbeddingBase(nn.Module):
-    def __init__(self, c_in, d_model, max_len=5000, learnable=False):
-        """
-        Base class for Rotary Channel Embeddings that implements the common functionality,
-        including the precomputation of sine and cosine embeddings and the forward method.
-
-        Args:
-            c_in (int): Number of input channels.
-            d_model (int): Model dimension (must be even).
-            max_len (int): Maximum sequence length.
-            learnable (bool): If True, the sinusoidal embeddings are learnable parameters;
-                              otherwise, they are fixed buffers.
-        """
-        super(RotaryChannelEmbeddingBase, self).__init__()
-        assert d_model % 2 == 0, "d_model must be even for ROPE."
-        self.d_model = d_model
-        self.c_in = c_in
+            raise ValueError("mode must be either 'positional' or 'channel'")
 
         # Compute the inverse frequency vector.
-        # Use 50000 instead of 10000 as in the provided example.
-        inv_freq = 1.0 / (50000 ** (torch.arange(0, d_model, 2).float() / d_model))
-        # Create a positions vector for max_len positions.
-        positions = torch.arange(0, max_len, dtype=torch.float)
-        # Compute sinusoidal inputs: shape (max_len, d_model/2)
+        inv_freq = 1.0 / (self.base_scale ** (torch.arange(0, d_model, 2).float() / d_model))
+        # Create a positions vector for the precomputed embeddings.
+        positions = torch.arange(0, self.embed_length, dtype=torch.float)
+        # Compute the sinusoidal input via an outer product.
         sinusoid_inp = torch.einsum("i,j->ij", positions, inv_freq)
-        # Pre-compute sine and cosine embeddings.
+        # Precompute sine and cosine embeddings.
         sin_embed = torch.sin(sinusoid_inp)
         cos_embed = torch.cos(sinusoid_inp)
-
+        
         if learnable:
-            # Register as learnable parameters.
+            # Register them as learnable parameters.
             self.sin_embed = nn.Parameter(sin_embed, requires_grad=True)
             self.cos_embed = nn.Parameter(cos_embed, requires_grad=True)
         else:
-            # Register as buffers (fixed values).
+            # Register as fixed buffers.
             self.register_buffer("sin_embed", sin_embed)
             self.register_buffer("cos_embed", cos_embed)
 
     def rotate_half(self, x):
-        """
-        Helper function that rotates half of the dimensions of x.
-        Splits the last dimension into two halves and returns a tensor where
-        the first half is replaced with -second half and the second half with the first half.
 
-        Args:
-            x: Tensor of shape (batch, seq_len, d_model).
-        
-        Returns:
-            A tensor of shape (batch, seq_len, d_model) with dimensions rotated.
-        """
-        x_even = -x[..., 1::2]  # Negate the odd-indexed components.
-        x_odd  = x[..., 0::2]   # Keep the even-indexed components.
-
-        # Stack along a new last dimension.
+        x_even = -x[..., 1::2]  # Negate every odd-indexed element.
+        x_odd = x[..., 0::2]    # Keep every even-indexed element.
+        # Stack along a new last dimension and then reshape back.
         stacked = torch.stack([x_even, x_odd], dim=-1)
-        # Merge the last two dimensions.
-        return stacked.view(x_even.shape[0], x_even.shape[1], -1)
+        new_shape = x_even.shape[:-1] + (-1,)
+        return stacked.view(*new_shape)
 
     def forward(self, x):
-        """
-        Applies the rotary transformation using pointwise multiplication.
-
-        Args:
-            x: Tensor of shape (batch, seq_len, d_model).
-            
-        Returns:
-            Tensor of shape (batch, seq_len, d_model) with rotary embeddings applied.
-        """
+    
         batch, seq_len, d_model = x.size()
 
-        # For this implementation, we only use the first 7 positions.
-        sin_embed = self.sin_embed[:7, :].unsqueeze(0)  # Shape: (1, 7, d_model/2)
-        cos_embed = self.cos_embed[:7, :].unsqueeze(0)  # Shape: (1, 7, d_model/2)
-
-        # Expand embeddings to cover the full d_model by repeating each half.
-        sin_embed = torch.repeat_interleave(sin_embed, repeats=2, dim=-1)  # Now shape: (1, 7, d_model)
-        cos_embed = torch.repeat_interleave(cos_embed, repeats=2, dim=-1)  # Now shape: (1, 7, d_model)
-
-        # Adjust the time dimension to match the sequence length (assuming seq_len is a multiple of 7).
-        repeat_factor = int(seq_len / 7)
-        sin_embed = sin_embed.repeat(1, repeat_factor, 1)
-        cos_embed = cos_embed.repeat(1, repeat_factor, 1)
+        if self.mode == "positional":
+            # Take the first seq_len positions from the precomputed embeddings.
+            sin_embed = self.sin_embed[:seq_len, :].unsqueeze(0)  # Shape: (1, seq_len, d_model/2)
+            cos_embed = self.cos_embed[:seq_len, :].unsqueeze(0)  # Shape: (1, seq_len, d_model/2)
+            # Expand each embedding to cover the full d_model.
+            sin_embed = torch.repeat_interleave(sin_embed, repeats=2, dim=-1)  # Shape: (1, seq_len, d_model)
+            cos_embed = torch.repeat_interleave(cos_embed, repeats=2, dim=-1)  # Shape: (1, seq_len, d_model)
+        elif self.mode == "channel":
+            # Use only a fixed number of positions (by default 7) for channel embeddings.
+            sin_embed = self.sin_embed[:self.embed_length, :].unsqueeze(0)  # Shape: (1, embed_length, d_model/2)
+            cos_embed = self.cos_embed[:self.embed_length, :].unsqueeze(0)  # Shape: (1, embed_length, d_model/2)
+            sin_embed = torch.repeat_interleave(sin_embed, repeats=2, dim=-1)  # Now (1, embed_length, d_model)
+            cos_embed = torch.repeat_interleave(cos_embed, repeats=2, dim=-1)  # Now (1, embed_length, d_model)
+            # The input's sequence length is assumed to be an integer multiple of embed_length.
+            repeat_factor = seq_len // self.embed_length
+            sin_embed = sin_embed.repeat(1, repeat_factor, 1)
+            cos_embed = cos_embed.repeat(1, repeat_factor, 1)
+        else:
+            raise ValueError("Invalid mode specified. Choose 'positional' or 'channel'.")
 
         # Apply the rotary transformation.
         return x * cos_embed + self.rotate_half(x) * sin_embed
 
 
-class RotaryChannelEmbeddingLearnable(RotaryChannelEmbeddingBase):
-    def __init__(self, c_in, d_model, max_len=5000):
-        """
-        Learnable Rotary Channel Embedding: the sinusoidal embeddings are learnable.
-        """
-        super(RotaryChannelEmbeddingLearnable, self).__init__(c_in, d_model, max_len, learnable=True)
+# Final subclasses for user convenience.
+
+# Rotary Positional Embeddings
+class LearnableRotaryPositionalEmbedding(UnifiedRotaryEmbeddingBase):
+    def __init__(self, d_model, max_len=5000):
+        super(LearnableRotaryPositionalEmbedding, self).__init__(
+            d_model=d_model,
+            max_len=max_len,
+            learnable=True,
+            mode="positional"
+        )
+
+class FixedRotaryPositionalEmbedding(UnifiedRotaryEmbeddingBase):
+    def __init__(self, d_model, max_len=5000):
+        super(FixedRotaryPositionalEmbedding, self).__init__(
+            d_model=d_model,
+            max_len=max_len,
+            learnable=False,
+            mode="positional"
+        )
 
 
-class RotaryChannelEmbeddingFixed(RotaryChannelEmbeddingBase):
-    def __init__(self, c_in, d_model, max_len=5000):
-        """
-        Fixed Rotary Channel Embedding: the sinusoidal embeddings remain fixed.
-        """
-        super(RotaryChannelEmbeddingFixed, self).__init__(c_in, d_model, max_len, learnable=False)
+# Rotary Channel Embeddings
+class RotaryChannelEmbeddingLearnable(UnifiedRotaryEmbeddingBase):
+    def __init__(self, c_in, d_model, max_len=5000, fixed_embed_length=7):
 
+        super(RotaryChannelEmbeddingLearnable, self).__init__(
+            d_model=d_model,
+            max_len=max_len,
+            learnable=True,
+            mode="channel",
+            c_in=c_in,
+            fixed_embed_length=fixed_embed_length
+        )
+
+class RotaryChannelEmbeddingFixed(UnifiedRotaryEmbeddingBase):
+    def __init__(self, c_in, d_model, max_len=5000, fixed_embed_length=7):
+       
+        super(RotaryChannelEmbeddingFixed, self).__init__(
+            d_model=d_model,
+            max_len=max_len,
+            learnable=False,
+            mode="channel",
+            c_in=c_in,
+            fixed_embed_length=fixed_embed_length
+        )
 
 
 
