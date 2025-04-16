@@ -76,10 +76,10 @@ class Informer(nn.Module):
         # dec_out = self.end_conv1(dec_out)
         # dec_out = self.end_conv2(dec_out.transpose(2,1)).transpose(1,2)
         if self.output_attention:
-            print(f'Decoder Output: {dec_out[:,-self.pred_len:,:]}', flush=True)
+            print(f'Decoder Output: {dec_out[:,-self.pred_len:,:].size()}', flush=True)
             return dec_out[:,-self.pred_len:,:], attns
         else:
-            print(f'Decoder Output: {dec_out[:,-self.pred_len:,:]}', flush=True)
+            print(f'Decoder Output: {dec_out[:,-self.pred_len:,:].size()}', flush=True)
             return dec_out[:,-self.pred_len:,:] # [B, L, D]
 
 
@@ -155,8 +155,8 @@ class InformerStack(nn.Module):
         # dec_out = self.end_conv1(dec_out)
         # dec_out = self.end_conv2(dec_out.transpose(2,1)).transpose(1,2)
         if self.output_attention:
-            print(f'Decoder Output: {dec_out[:,-self.pred_len:,:]}', flush=True)
+            print(f'Decoder Output: {dec_out[:,-self.pred_len:,:].size()}', flush=True)
             return dec_out[:,-self.pred_len:,:], attns
         else:
-            print(f'Decoder Output: {dec_out[:,-self.pred_len:,:]}', flush=True)
+            print(f'Decoder Output: {dec_out[:,-self.pred_len:,:].size()}', flush=True)
             return dec_out[:,-self.pred_len:,:] # [B, L, D]
