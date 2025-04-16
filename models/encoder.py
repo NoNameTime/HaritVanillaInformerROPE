@@ -35,6 +35,13 @@ class EncoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.activation = F.relu if activation == "relu" else F.gelu
 
+        self.norm3 = nn.LayerNorm(d_model)
+        self.W = nn.Parameter(torch.empty(7, 7))
+        nn.init.xavier_uniform_(self.W)
+        
+        self.c = 7
+
+
     def forward(self, x, attn_mask=None):
         # x [B, L, D]
         # x = x + self.dropout(self.attention(
@@ -51,7 +58,27 @@ class EncoderLayer(nn.Module):
         y = self.dropout(self.activation(self.conv1(y.transpose(-1,1))))
         y = self.dropout(self.conv2(y).transpose(-1,1))
 
-        return self.norm2(x+y), attn
+        #return self.norm2(x+y), attn
+
+        
+        x = self.norm2(x+y)
+        
+        # Residual connection and normalization
+
+        # Apply learnable matrix W after FFN
+        batch_size, seq_len, d_model = x.shape
+        n = seq_len // self.c  # Compute number of groups
+        # Reshape to (batch_size, n, c, d_model) for group-wise transformation
+        x_reshaped = x.view(batch_size, n, self.c, d_model)
+        # Apply W to the c dimension: W (c, c) multiplies x_reshaped (..., c, d_model)
+        x_transformed = torch.einsum('ij,bnjd->bnid', self.W, x_reshaped)
+        # Reshape back to (batch_size, n*c, d_model)
+        x = x_transformed.reshape(batch_size, seq_len, d_model)
+        x = self.dropout(x)
+        
+        return self.norm3(x), attn
+
+
 
 class Encoder(nn.Module):
     def __init__(self, attn_layers, conv_layers=None, norm_layer=None):
