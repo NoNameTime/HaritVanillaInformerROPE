@@ -14,8 +14,14 @@ class DecoderLayer(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         self.norm3 = nn.LayerNorm(d_model)
+        
         self.dropout = nn.Dropout(dropout)
         self.activation = F.relu if activation == "relu" else F.gelu
+
+        self.norm4 = nn.LayerNorm(d_model)
+        self.W = nn.Parameter(torch.empty(7, 7))
+        nn.init.xavier_uniform_(self.W)
+        self.c = 7
 
     def forward(self, x, cross, x_mask=None, cross_mask=None):
         x = x + self.dropout(self.self_attention(
@@ -32,8 +38,27 @@ class DecoderLayer(nn.Module):
         y = x = self.norm2(x)
         y = self.dropout(self.activation(self.conv1(y.transpose(-1,1))))
         y = self.dropout(self.conv2(y).transpose(-1,1))
+        
+        x = self.norm3(x + y)
+        #return self.norm3(x+y)
 
-        return self.norm3(x+y)
+
+        # Residual connection and normalization
+
+        # Apply learnable matrix W after FFN
+        batch_size, seq_len, d_model = x.shape
+        n = seq_len // self.c  # Compute number of groups
+        # Reshape to (batch_size, n, c, d_model) for group-wise transformation
+        x_reshaped = x.view(batch_size, n, self.c, d_model)
+        # Apply W to the c dimension: W (c, c) multiplies x_reshaped (..., c, d_model)
+        x_transformed = torch.einsum('ij,bnjd->bnid', self.W, x_reshaped)
+        # Reshape back to (batch_size, n*c, d_model)
+        x = x_transformed.reshape(batch_size, seq_len, d_model)
+        x = self.dropout(x)
+        
+        return self.norm4(x)
+
+
 
 class Decoder(nn.Module):
     def __init__(self, layers, norm_layer=None):
@@ -49,3 +74,4 @@ class Decoder(nn.Module):
             x = self.norm(x)
 
         return x
+
