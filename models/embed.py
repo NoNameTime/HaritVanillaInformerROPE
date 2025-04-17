@@ -7,12 +7,12 @@ import math
 class UnifiedRotaryEmbeddingBase(nn.Module):
     def __init__(self,
                  d_model,
-                 max_len=6000,
+                 max_len=5000,
                  learnable=False,
                  mode="positional",  # "positional" or "channel"
                  c_in=None,          # required in "channel" mode
                  fixed_embed_length=None,  # for channel mode: how many positions to precompute (default is 7)
-                 base_scale=None):   # denominator base for inverse frequency (default: 10000 for positional, 60000 for channel)
+                 base_scale=None):   # denominator base for inverse frequency (default: 10000 for positional, 50000 for channel)
         """
         A unified base class for Rotary Embeddings, supporting both positional and channel applications.
         
@@ -25,7 +25,7 @@ class UnifiedRotaryEmbeddingBase(nn.Module):
             fixed_embed_length (int, optional): In channel mode, the number of positions in the precomputed table.
                                                 Defaults to 7 if not provided.
             base_scale (float, optional): Scale factor in the denominator for computing the inverse frequency.
-                                          Defaults to 10000 for positional and 60000 for channel.
+                                          Defaults to 10000 for positional and 50000 for channel.
         """
         super(UnifiedRotaryEmbeddingBase, self).__init__()
         assert d_model % 2 == 0, "d_model must be divisible by 2"
@@ -39,7 +39,7 @@ class UnifiedRotaryEmbeddingBase(nn.Module):
             # In channel mode we use a fixed number of positions from the sinusoidal table.
             self.embed_length = fixed_embed_length if fixed_embed_length is not None else 7
             # Use a different base scale for channel (if not overridden).
-            self.base_scale = base_scale if base_scale is not None else 60000
+            self.base_scale = base_scale if base_scale is not None else 50000
         elif mode == "positional":
             # For positional mode, use the entire sequence up to max_len.
             self.embed_length = max_len
@@ -107,7 +107,7 @@ class UnifiedRotaryEmbeddingBase(nn.Module):
 
 # Rotary Positional Embeddings
 class LearnableRotaryPositionalEmbedding(UnifiedRotaryEmbeddingBase):
-    def __init__(self, d_model, max_len=6000):
+    def __init__(self, d_model, max_len=5000):
         super(LearnableRotaryPositionalEmbedding, self).__init__(
             d_model=d_model,
             max_len=max_len,
@@ -116,7 +116,7 @@ class LearnableRotaryPositionalEmbedding(UnifiedRotaryEmbeddingBase):
         )
 
 class FixedRotaryPositionalEmbedding(UnifiedRotaryEmbeddingBase):
-    def __init__(self, d_model, max_len=6000):
+    def __init__(self, d_model, max_len=5000):
         super(FixedRotaryPositionalEmbedding, self).__init__(
             d_model=d_model,
             max_len=max_len,
@@ -127,7 +127,7 @@ class FixedRotaryPositionalEmbedding(UnifiedRotaryEmbeddingBase):
 
 # Rotary Channel Embeddings
 class RotaryChannelEmbeddingLearnable(UnifiedRotaryEmbeddingBase):
-    def __init__(self, c_in, d_model, max_len=6000, fixed_embed_length=7):
+    def __init__(self, c_in, d_model, max_len=5000, fixed_embed_length=7):
 
         super(RotaryChannelEmbeddingLearnable, self).__init__(
             d_model=d_model,
@@ -139,7 +139,7 @@ class RotaryChannelEmbeddingLearnable(UnifiedRotaryEmbeddingBase):
         )
 
 class RotaryChannelEmbeddingFixed(UnifiedRotaryEmbeddingBase):
-    def __init__(self, c_in, d_model, max_len=6000, fixed_embed_length=7):
+    def __init__(self, c_in, d_model, max_len=5000, fixed_embed_length=7):
        
         super(RotaryChannelEmbeddingFixed, self).__init__(
             d_model=d_model,
@@ -161,14 +161,14 @@ class RotaryChannelEmbeddingFixed(UnifiedRotaryEmbeddingBase):
 #     d_model = 512  # Must be even
 #     dummy_input = torch.zeros(batch, seq_len, d_model)
     
-#     rope = RotaryPositionalEmbedding(d_model, max_len=6000)
+#     rope = RotaryPositionalEmbedding(d_model, max_len=5000)
 #     out = rope(dummy_input)
 #     print("Output shape:", out.shape)  # Expected: (2, 20, 512)
 
 
 
 class PositionalEmbedding(nn.Module):
-    def __init__(self, d_model, max_len=6000):
+    def __init__(self, d_model, max_len=5000):
         super(PositionalEmbedding, self).__init__()
         # Compute the positional encodings once in log space.
         pe = torch.zeros(max_len, d_model).float()
